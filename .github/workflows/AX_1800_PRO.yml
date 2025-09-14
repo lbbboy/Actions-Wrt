@@ -40,8 +40,6 @@ env:
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
-  TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
 jobs:
   build:
@@ -99,13 +97,6 @@ jobs:
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
 
-    - name: SSH connection to Actions
-      env:
-        TELEGRAM_BOT_TOKEN : ${{ secrets.TELEGRAM_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      uses: lbbboy/ssh2actions@main
-      if: ${{ github.event.inputs.ssh == 'true' }}
-
     - name: Download package
       id: package
       run: |
@@ -114,6 +105,13 @@ jobs:
         make download -j$(nproc)
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
+
+    - name: SSH connection to Actions
+      env:
+        TELEGRAM_BOT_TOKEN : ${{ secrets.TELEGRAM_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      uses: lbbboy/ssh2actions@main
+      if: ${{ github.event.inputs.ssh == 'true' }}
 
     - name: Compile the firmware
       id: compile
@@ -192,11 +190,11 @@ jobs:
       continue-on-error: true
       run: |
         if [ "${{ job.status }}" = "success" ]; then
-          curl -s -k --data chat_id="${{ env.TELEGRAM_CHAT_ID }}" \
-               --data "text=🎉 OpenWrt ${{ env.VERSION }} ${{ env.WRT_TARGET }} 编译成功 😋 🔗 https://github.com/${{ github.repository }}/releases/latest/" \
-               "https://api.telegram.org/bot${{ env.TELEGRAM_TOKEN }}/sendMessage"
+          curl -s -k --data chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+               --data "text=🎉 OpenWrt ${{ env.DEVICE_NAME }} ${{ env.FIRMWARE }} 编译成功 😋 🔗 https://github.com/${{ github.repository }}/releases/latest/" \
+               "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage"
         else
-          curl -s -k --data chat_id="${{ env.TELEGRAM_CHAT_ID }}" \
-               --data "text=❌ OpenWrt ${{ env.VERSION }} ${{ env.WRT_TARGET }} 编译失败 😂 🔗 https://github.com/${{ github.repository }}/releases/latest/" \
-               "https://api.telegram.org/bot${{ env.TELEGRAM_TOKEN }}/sendMessage"
+          curl -s -k --data chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+               --data "text=❌ OpenWrt ${{ env.DEVICE_NAME }} ${{ env.FIRMWARE }} 编译失败 😂 🔗 https://github.com/${{ github.repository }}/releases/latest/" \
+               "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage"
         fi
