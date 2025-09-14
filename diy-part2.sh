@@ -19,10 +19,13 @@ sed -i 's/luci-theme-bootstrap/luci-theme-material/g' feeds/luci/collections/luc
 # Modify hostname
 #sed -i 's/OpenWrt/P3TERX-Router/g' package/base-files/files/bin/config_generate
 
+# 隐藏顶部左侧的品牌文字
+cat >> package/feeds/luci/luci-theme-material/htdocs/luci-static/material/custom.css <<'EOF'
 
-#hash 替换 
-sed -i 's/3ec87f221e8905d4b6b8b3d207b7f7c4666c3bc8db7c1f06d4ae2e78f863b8f4/881cbf75efafe380b5adc91bfb1f68add5e29c9274eb950bb1e815c7a3622807/' \
-  feeds/nss_packages/firmware/nss-firmware/Makefile
+a.brand {
+    display: none !important;
+}
+EOF
 
 
 
