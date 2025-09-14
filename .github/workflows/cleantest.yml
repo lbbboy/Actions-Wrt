@@ -1,0 +1,16 @@
+name: Clean Old Workflow Runs
+
+on:
+  workflow_dispatch:
+
+permissions: write-all
+
+jobs:
+  clean-runs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete old workflow runs
+        uses: Mattraks/delete-workflow-runs@main
+        with:
+          retain_days: 0
+          keep_minimum_runs: 0
