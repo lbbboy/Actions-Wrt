@@ -50,6 +50,7 @@ jobs:
           mode: ngrok
         env:
          NGROK_REGION: us
+         NGROK_TOKEN: ${{ secrets.NGROK_TOKEN }}
          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
