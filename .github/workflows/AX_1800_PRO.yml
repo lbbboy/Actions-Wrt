@@ -51,7 +51,7 @@ jobs:
         DEBIAN_FRONTEND: noninteractive
       run: |
         sudo -E apt -yqq update
-        sudo -E apt-get -qqy install $(curl -fsSL is.gd/XuoD5d)
+        sudo -E apt-get -qqy install $(curl -fsSL is.gd/7Bt00z)
         sudo -E systemctl daemon-reload
         sudo -E timedatectl set-timezone "Asia/Shanghai"
         sudo timedatectl set-timezone "$TZ"
