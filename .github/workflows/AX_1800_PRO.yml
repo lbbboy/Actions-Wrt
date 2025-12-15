@@ -13,7 +13,7 @@
 name: AX 1800 PRO
 on:
   schedule:
-    - cron: '0 22 * * *'
+#    - cron: '0 22 * * *'
   repository_dispatch:
   workflow_dispatch:
     inputs:
