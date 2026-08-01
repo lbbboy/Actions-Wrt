@@ -29,7 +29,7 @@ on:
 permissions: write-all
 
 env:
-  REPO_URL: https://github.com/VIKINGYFY/immortalwrt
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
   REPO_BRANCH: main
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: .config
