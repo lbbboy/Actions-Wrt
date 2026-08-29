@@ -18,5 +18,5 @@
 #echo 'src-git passwall https://github.com/xiaorouji/openwrt-passwall' >>feeds.conf.default
 
 # NSS
-echo 'src-git nss_packages https://github.com/qosmio/nss-packages.git' >>feeds.conf.default
-echo 'src-git sqm_scripts_nss https://github.com/qosmio/sqm-scripts-nss.git' >>feeds.conf.default
+#echo 'src-git nss_packages https://github.com/qosmio/nss-packages.git' >>feeds.conf.default
+#echo 'src-git sqm_scripts_nss https://github.com/qosmio/sqm-scripts-nss.git' >>feeds.conf.default
