@@ -12,8 +12,8 @@
 
 name: AX 1800 PRO
 on:
-#  schedule:
-#    - cron: 0 22 * * *
+  schedule:
+    - cron: 0 22 * * *
   repository_dispatch:
   workflow_dispatch:
     inputs:
@@ -23,18 +23,21 @@ on:
         default: 'false'
         type: choice
         options:
-          - false
-          - true
+          - 'false'
+          - 'true'
       ngrok:
         description: 'Start SSH via ngrok'
         required: true
         default: 'false'
         type: choice
         options:
-          - false
-          - true
+          - 'false'
+          - 'true'
 
-permissions: write-all
+# 最小权限：release 读写 + 删除 workflow runs
+permissions:
+  contents: write
+  actions: write
 
 env:
   REPO_URL: https://github.com/LiBwrt/LibWrt.git
@@ -43,40 +46,51 @@ env:
   CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
-  DIY_P3_SH: diy-part3.sh
   UPLOAD_BIN_DIR: true
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
+  # 发布说明中的登录/WIFI 信息：留空则自动从源码与 diy 脚本的结果中检测；
+  # 如需明确显示，请填写（注意：公开仓库的 Release 任何人可见）
+  LAN_IP: ''
+  LOGIN_PASSWORD: ''
+  WIFI_SSID: ''
+  WIFI_KEY: ''
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
 
     steps:
+    # Checkout 必须最先执行，后面要读取仓库里的 dependencies 文件
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Free disk space
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        sudo docker image prune --all --force || true
+        df -hT $PWD
+
     - name: Initialization environment
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
         sudo -E apt -yqq update
-        sudo -E apt-get -qqy install $(curl -fsSL is.gd/7Bt00z)
+        sudo -E apt -yqq install $(cat "$GITHUB_WORKSPACE/dependencies")
         sudo -E systemctl daemon-reload
-        sudo -E timedatectl set-timezone "Asia/Shanghai"
         sudo timedatectl set-timezone "$TZ"
-
-    - name: Maximize build space
-      uses: easimon/maximize-build-space@master
-      with:
-        root-reserve-mb: 4096
-        swap-size-mb: 1024
-
-    - name: Checkout
-      uses: actions/checkout@v4
 
     - name: Clone source code
       run: |
-        df -hT $PWD
         git clone --depth=1 --single-branch $REPO_URL -b $REPO_BRANCH openwrt
+
+    - name: Get source commit
+      id: srcinfo
+      run: |
+        cd openwrt
+        echo "commit=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
     - name: Load custom feeds
       run: |
@@ -99,52 +113,76 @@ jobs:
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
 
+    # 缓存键由源码仓库（REPO_URL）当前分支的最新提交决定：上游无新提交则精确命中
+    - name: Cache OpenWrt Toolchain
+      uses: actions/cache@v4
+      with:
+        path: |
+          openwrt/staging_dir/host
+          openwrt/staging_dir/toolchain-*
+          openwrt/build_dir/host
+          openwrt/build_dir/toolchain-*
+        key: toolchain-${{ env.REPO_BRANCH }}-${{ steps.srcinfo.outputs.commit }}
+        restore-keys: |
+          toolchain-${{ env.REPO_BRANCH }}-
+
     - name: Download package
       id: package
       run: |
-        set -e
         cd openwrt
         make defconfig
         make download -j$(nproc)
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
+    # TODO: 建议把下面两个 ssh2actions 固定到 commit SHA（它们能读取你的 secrets）
     - name: SSH connection to Actions
-      env:
-        TELEGRAM_BOT_TOKEN : ${{ secrets.TELEGRAM_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       uses: lbbboy/ssh2actions@main
       if: ${{ github.event.inputs.ssh == 'true' }}
-      
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
     - name: Start SSH via ngrok
       uses: lbbboy/ssh2actions@main
       if: ${{ github.event.inputs.ngrok == 'true' }}
       with:
         mode: ngrok
       env:
-       NGROK_REGION: us
-       NGROK_TOKEN: ${{ secrets.NGROK_TOKEN }}
-       SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
-       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        NGROK_REGION: us
+        NGROK_TOKEN: ${{ secrets.NGROK_TOKEN }}
+        SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
     - name: Compile the firmware
       id: compile
+      shell: bash
       run: |
         cd openwrt
-        echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 || make -j1 V=s
+        echo "$(nproc) thread compile"
+        # 先多线程；失败则单线程详细日志重试，并保存日志
+        if ! make -j$(nproc); then
+          make -j1 V=s 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+        fi
         echo "status=success" >> $GITHUB_OUTPUT
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
         [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+    - name: Upload build log
+      uses: actions/upload-artifact@v4
+      if: failure() && steps.compile.outcome == 'failure' && hashFiles('build.log') != ''
+      with:
+        name: build-log
+        path: build.log
 
     - name: Check space usage
       if: (!cancelled())
       run: df -hT
 
     - name: Upload bin directory
-      uses: actions/upload-artifact@main
+      uses: actions/upload-artifact@v4
       if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
       with:
         name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
@@ -152,7 +190,7 @@ jobs:
 
     - name: Organize files
       id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
         cd openwrt/bin/targets/*/*
         rm -rf packages
@@ -160,7 +198,7 @@ jobs:
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware directory
-      uses: actions/upload-artifact@main
+      uses: actions/upload-artifact@v4
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
         name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
@@ -168,15 +206,92 @@ jobs:
 
     - name: Generate release tag
       id: tag
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
+      env:
+        COMMIT: ${{ steps.srcinfo.outputs.commit }}
       run: |
+        set +e   # 信息采集为尽力而为，某项取不到不应导致发布失败
         echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
-        touch release.txt
-        [ ${UPLOAD_GOFILE} = true && ${{ steps.gofile.outputs.url }} ] && echo "🔗 [GoFile](${{ steps.gofile.outputs.url }})" >> release.txt
+
+        cd openwrt
+        SRC_URL="${REPO_URL%.git}"
+        DEVICE=$(cat DEVICE_NAME 2>/dev/null | head -1)
+        MANIFEST=$(ls "$FIRMWARE"/*.manifest 2>/dev/null | head -1)
+
+        # 平台
+        BOARD=$(sed -n 's/^CONFIG_TARGET_BOARD="\(.*\)"/\1/p' .config)
+        SUBTARGET=$(sed -n 's/^CONFIG_TARGET_SUBTARGET="\(.*\)"/\1/p' .config)
+        ARCH=$(sed -n 's/^CONFIG_TARGET_ARCH_PACKAGES="\(.*\)"/\1/p' .config)
+        PLATFORM="${BOARD}/${SUBTARGET}（${ARCH}）"
+
+        # 内核版本：优先取 manifest，其次取 build_dir
+        KERNEL=""
+        [ -n "$MANIFEST" ] && KERNEL=$(grep -m1 '^kernel - ' "$MANIFEST" | awk '{print $3}' | sed -E 's/[~-].*//')
+        [ -z "$KERNEL" ] && KERNEL=$(ls -d build_dir/target-*/linux-*/linux-[0-9]* 2>/dev/null | grep -oE 'linux-[0-9]+\.[0-9]+\.[0-9]+$' | head -1 | sed 's/linux-//')
+
+        # 登录地址：env 覆盖 > uci-defaults > config_generate
+        DETECT_IP=$(grep -rhoE "network\.lan\.ipaddr=['\"]?[0-9]+(\.[0-9]+){3}" files/etc/uci-defaults 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+){3}' | head -1)
+        [ -z "$DETECT_IP" ] && DETECT_IP=$(grep -m1 'ipad=' package/base-files/files/bin/config_generate 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+){3}' | head -1)
+        LAN="${LAN_IP:-$DETECT_IP}"
+        [ -z "$LAN" ] && LAN="192.168.1.1"
+
+        # 登录密码：env 覆盖；否则只能判断 root 是否预设了密码哈希（无法还原明文）
+        if [ -n "$LOGIN_PASSWORD" ]; then
+          PASS="$LOGIN_PASSWORD"
+        else
+          ROOT_HASH=$(cat files/etc/shadow package/base-files/files/etc/shadow 2>/dev/null | grep -m1 '^root:' | cut -d: -f2)
+          if [ -z "$ROOT_HASH" ]; then PASS="无（空密码）"; else PASS="已预设（请见自定义配置）"; fi
+        fi
+
+        # WIFI：env 覆盖；否则从 mac80211.sh / uci-defaults 里尽力检测
+        WIFI_SRC="package/kernel/mac80211/files/lib/wifi/mac80211.sh files/etc/uci-defaults"
+        if [ -n "$WIFI_SSID" ]; then
+          SSID="$WIFI_SSID"
+        else
+          SSID=$(grep -rhoE "\.ssid=[^ ]+" $WIFI_SRC 2>/dev/null | cut -d= -f2- | tr -d "'\"" | sort -u | paste -sd'/' -)
+          [ -z "$SSID" ] && SSID="OpenWrt（默认）"
+        fi
+        if [ -n "$WIFI_KEY" ]; then
+          KEY="$WIFI_KEY"
+        else
+          KEY=$(grep -rhoE "\.key=[^ ]+" $WIFI_SRC 2>/dev/null | cut -d= -f2- | tr -d "'\"" | sort -u | paste -sd'/' -)
+          [ -z "$KEY" ] && KEY="无（未加密）"
+        fi
+
+        # 插件列表：优先取 manifest 里实际打进固件的 luci-app / luci-theme
+        if [ -n "$MANIFEST" ]; then
+          PLUGINS=$(awk '{print $1}' "$MANIFEST" | grep -E '^luci-(app|theme)-' | grep -v -- '-i18n-' | sort -u)
+        else
+          PLUGINS=$(grep -oE '^CONFIG_PACKAGE_luci-(app|theme)-[^=]+=y' .config | sed -E 's/^CONFIG_PACKAGE_//; s/=y$//' | grep -v -- '-i18n-' | sort -u)
+        fi
+        PLUGIN_COUNT=$(printf '%s\n' "$PLUGINS" | grep -c .)
+        PLUGIN_LIST=$(printf '%s\n' "$PLUGINS" | sed 's/^/- /')
+
+        cat > "$GITHUB_WORKSPACE/release.txt" <<EOF
+        - **源码：** ${SRC_URL}
+        - **分支：** ${REPO_BRANCH}
+        - **提交：** [${COMMIT:0:7}](${SRC_URL}/commit/${COMMIT})
+        - **配置：** ${CONFIG_FILE}（设备：${DEVICE}）
+        - **平台：** ${PLATFORM}
+        - **登录地址：** http://${LAN}
+        - **登录密码：** ${PASS}
+        - **WIFI名称：** ${SSID}
+        - **WIFI密码：** ${KEY}
+        - **内核版本：** ${KERNEL:-未知}
+        - **插件列表：**（共 ${PLUGIN_COUNT} 个）
+
+        <details>
+        <summary>点击展开</summary>
+
+        ${PLUGIN_LIST}
+
+        </details>
+        EOF
+        cat "$GITHUB_WORKSPACE/release.txt"
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
-      uses: softprops/action-gh-release@master
+      uses: softprops/action-gh-release@v2
       if: steps.tag.outputs.status == 'success' && !cancelled()
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -185,14 +300,15 @@ jobs:
         body_path: release.txt
         files: ${{ env.FIRMWARE }}/*
 
+    # 版本号请按实际可用 tag 核对；保留最近几次运行记录便于排查
     - name: Delete workflow runs
-      uses: Mattraks/delete-workflow-runs@main
+      uses: Mattraks/delete-workflow-runs@v2
       with:
-        retain_days: 0
-        keep_minimum_runs: 0
+        retain_days: 7
+        keep_minimum_runs: 6
 
     - name: Remove old Releases
-      uses: dev-drprasad/delete-older-releases@master
+      uses: dev-drprasad/delete-older-releases@v0.3.4
       if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       with:
         keep_latest: 3
@@ -203,13 +319,52 @@ jobs:
     - name: Telegram notification
       if: always()
       continue-on-error: true
+      env:
+        TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        STATUS: ${{ job.status }}
+        REPO: ${{ github.repository }}
       run: |
-        if [ "${{ job.status }}" = "success" ]; then
-          curl -s -k --data chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
-               --data "text=🎉 OpenWrt ${{ env.DEVICE_NAME }} ${{ env.FIRMWARE }} 编译成功 😋 🔗 https://github.com/${{ github.repository }}/releases/latest/" \
-               "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage"
+        if [ "$STATUS" = "success" ]; then
+          TEXT="🎉 OpenWrt${DEVICE_NAME} 编译成功 😋 🔗 https://github.com/${REPO}/releases/latest/"
         else
-          curl -s -k --data chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
-               --data "text=❌ OpenWrt ${{ env.DEVICE_NAME }} ${{ env.FIRMWARE }} 编译失败 😂 🔗 https://github.com/${{ github.repository }}/releases/latest/" \
-               "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage"
+          TEXT="❌ OpenWrt${DEVICE_NAME} 编译失败 😂 🔗 https://github.com/${REPO}/actions"
         fi
+        curl -s --data chat_id="$TG_CHAT" \
+             --data-urlencode "text=$TEXT" \
+             "https://api.telegram.org/bot${TG_TOKEN}/sendMessage"
+
+  # 独立 job：必须等 build 结束后再清理。
+  # actions/cache 是在 build 的收尾阶段才保存新缓存，所以放在这里才能准确"只留最近 3 个"。
+  clean-cache:
+    needs: build
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+    steps:
+    - name: Keep latest 3 toolchain caches
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        REPO: ${{ github.repository }}
+        KEEP: 3
+      run: |
+        # 只处理以 toolchain- 开头的缓存，按创建时间新→旧排序，跳过最近 KEEP 个，其余删除
+        gh cache list --repo "$REPO" --key toolchain- \
+          --sort created_at --order desc --limit 100 \
+          --json id,key,createdAt \
+          --jq ".[$KEEP:][] | [.id, .key] | @tsv" > old_caches.txt || true
+
+        if [ ! -s old_caches.txt ]; then
+          echo "没有需要清理的缓存"
+          exit 0
+        fi
+
+        while IFS=$'\t' read -r id key; do
+          echo "删除缓存: $key ($id)"
+          gh cache delete "$id" --repo "$REPO" || true
+        done < old_caches.txt
+
+        echo "当前剩余缓存:"
+        gh cache list --repo "$REPO" --key toolchain- --sort created_at --order desc
