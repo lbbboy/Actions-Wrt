@@ -126,6 +126,21 @@ jobs:
         restore-keys: |
           toolchain-${{ env.REPO_BRANCH }}-
 
+    # 修复缓存失效：每次全新 git clone 会让 tools/toolchain 源码的 mtime 变成"现在"，
+    # 导致 (1) 比缓存里的 stamp 更新 -> toolchain 被判定需重建；
+    #      (2) tools 的 .prepared_<md5> 由"路径+mtime"算出 -> 文件名每次都变 -> tools 被重建。
+    # 这里把源码 mtime 统一设为"由文件内容决定的旧时间"：内容不变则时间不变，内容变了时间也变。
+    # 必须在编译（以及缓存保存）之前执行，保证保存下来的 stamp 名与下次运行一致。
+    - name: Normalize source timestamps for cache reuse
+      run: |
+        cd openwrt
+        find tools toolchain -type f -not -path '*/.git/*' -print0 | xargs -0 -n 200 bash -c '
+          for f; do
+            h=$(sha1sum "$f" | cut -c1-7)
+            touch -d "@$((0x$h + 1000000000))" "$f"
+          done' _
+        echo "已处理文件数: $(find tools toolchain -type f | wc -l)"
+
     - name: Download package
       id: package
       run: |
