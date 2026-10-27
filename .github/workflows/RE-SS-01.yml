@@ -13,7 +13,7 @@
 name: JDCloud RE-SS-01
 on:
   schedule:
-    - cron: 0 22 * * *
+    - cron: 0 20 * * *
   repository_dispatch:
   workflow_dispatch:
     inputs:
@@ -59,7 +59,7 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 350
 
     steps:
