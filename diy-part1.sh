@@ -22,5 +22,5 @@
 #echo 'src-git sqm_scripts_nss https://github.com/qosmio/sqm-scripts-nss.git' >>feeds.conf.default
 
  #修改jdc ax1800 pro 的内核大小为12M
-image_file='./target/linux/qualcommax/image/ipq60xx.mk'
-sed -i "/^define Device\/jdcloud_re-ss-01/,/^endef/ s/KERNEL_SIZE\s*:=\s*6144k/KERNEL_SIZE := 12288k/" $image_file
+#image_file='./target/linux/qualcommax/image/ipq60xx.mk'
+#sed -i "/^define Device\/jdcloud_re-ss-01/,/^endef/ s/KERNEL_SIZE\s*:=\s*6144k/KERNEL_SIZE := 12288k/" $image_file
