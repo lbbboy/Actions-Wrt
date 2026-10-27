@@ -10,7 +10,7 @@
 # See /LICENSE for more information.
 #
 
-name: AX 1800 PRO
+name: JDCloud RE-SS-01
 on:
   schedule:
     - cron: 0 22 * * *
@@ -52,10 +52,10 @@ env:
   TZ: Asia/Shanghai
   # 发布说明中的登录/WIFI 信息：留空则自动从源码与 diy 脚本的结果中检测；
   # 如需明确显示，请填写（注意：公开仓库的 Release 任何人可见）
-  LAN_IP: ''
-  LOGIN_PASSWORD: ''
-  WIFI_SSID: ''
-  WIFI_KEY: ''
+  LAN_IP: '192.168.123.1'
+  LOGIN_PASSWORD: '没有密码'
+  WIFI_SSID: 'OWRT'
+  WIFI_KEY: '12345678'
 
 jobs:
   build:
