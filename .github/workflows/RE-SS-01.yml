@@ -50,6 +50,11 @@ env:
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
+  # 手动让所有缓存失效：改一下这个版本号即可（v1 -> v2）
+  CACHE_VERSION: v1
+  # 是否启用 ccache（缓存内核与软件包的编译结果）；ccache 目录上限见 CCACHE_MAXSIZE
+  USE_CCACHE: true
+  CCACHE_MAXSIZE: 2G
   # 发布说明中的登录/WIFI 信息：留空则自动从源码与 diy 脚本的结果中检测；
   # 如需明确显示，请填写（注意：公开仓库的 Release 任何人可见）
   LAN_IP: '192.168.123.1'
@@ -113,7 +118,30 @@ jobs:
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
 
-    # 缓存键由源码仓库（REPO_URL）当前分支的最新提交决定：上游无新提交则精确命中
+    - name: Enable ccache
+      if: env.USE_CCACHE == 'true'
+      run: |
+        cd openwrt
+        sed -i '/^CONFIG_DEVEL=/d;/^# CONFIG_DEVEL is not set/d;/^CONFIG_CCACHE=/d;/^# CONFIG_CCACHE is not set/d' .config
+        echo 'CONFIG_DEVEL=y' >> .config
+        echo 'CONFIG_CCACHE=y' >> .config
+
+    # 先展开成完整配置，缓存键才能反映真实的工具链选项
+    - name: Expand config
+      run: cd openwrt && make defconfig
+
+    # 缓存键 = 版本号 + 分支 + 工具链相关配置哈希 + tools/toolchain 源码内容哈希。
+    # 上游提交变了但这两处没变 -> 精确命中，不重复保存；只有工具链真的变了才重建缓存。
+    - name: Compute toolchain cache key
+      id: ckey
+      run: |
+        cd openwrt
+        CONF=$(grep -E '^(# )?CONFIG_(TARGET_BOARD|TARGET_SUBTARGET|TARGET_ARCH_PACKAGES|ARCH|CPU_TYPE|LIBC|USE_MUSL|USE_GLIBC|USE_UCLIBC|GCC_|BINUTILS_|GDB|KERNEL_HEADERS|TOOLCHAIN|EXTERNAL_TOOLCHAIN|SOFT_FLOAT|CCACHE|DEVEL|PKG_CC_STACKPROTECTOR|PKG_FORTIFY|PKG_RELRO|PKG_ASLR|SSP_SUPPORT|TARGET_OPTIMIZATION)' .config | LC_ALL=C sort | sha256sum | cut -c1-16)
+        SRC=$(find tools toolchain -type f -not -path '*/.git/*' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16)
+        echo "conf=$CONF" >> $GITHUB_OUTPUT
+        echo "src=$SRC" >> $GITHUB_OUTPUT
+        echo "toolchain 配置哈希: $CONF；tools/toolchain 源码哈希: $SRC"
+
     - name: Cache OpenWrt Toolchain
       uses: actions/cache@v4
       with:
@@ -122,9 +150,21 @@ jobs:
           openwrt/staging_dir/toolchain-*
           openwrt/build_dir/host
           openwrt/build_dir/toolchain-*
-        key: toolchain-${{ env.REPO_BRANCH }}-${{ steps.srcinfo.outputs.commit }}
+        key: toolchain-${{ env.CACHE_VERSION }}-${{ env.REPO_BRANCH }}-${{ steps.ckey.outputs.conf }}-${{ steps.ckey.outputs.src }}
+        # 只回退到"工具链配置相同"的旧缓存（例如某个 tool 的 Makefile 变了，只重编变化的部分）
         restore-keys: |
-          toolchain-${{ env.REPO_BRANCH }}-
+          toolchain-${{ env.CACHE_VERSION }}-${{ env.REPO_BRANCH }}-${{ steps.ckey.outputs.conf }}-
+
+    # ccache：内核与软件包的编译结果缓存。key 每次运行唯一，靠 restore-keys 取最新一份，
+    # 编译后再保存更新后的内容（见下方 Save ccache）。
+    - name: Restore ccache
+      if: env.USE_CCACHE == 'true'
+      uses: actions/cache/restore@v4
+      with:
+        path: openwrt/.ccache
+        key: ccache-${{ env.CACHE_VERSION }}-${{ env.REPO_BRANCH }}-${{ github.run_id }}
+        restore-keys: |
+          ccache-${{ env.CACHE_VERSION }}-${{ env.REPO_BRANCH }}-
 
     # 修复缓存失效：每次全新 git clone 会让 tools/toolchain 源码的 mtime 变成"现在"，
     # 导致 (1) 比缓存里的 stamp 更新 -> toolchain 被判定需重建；
@@ -145,7 +185,6 @@ jobs:
       id: package
       run: |
         cd openwrt
-        make defconfig
         make download -j$(nproc)
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
@@ -184,6 +223,21 @@ jobs:
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
         [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+    - name: ccache stats
+      if: ${{ !cancelled() && env.USE_CCACHE == 'true' }}
+      continue-on-error: true
+      run: |
+        cd openwrt
+        CCACHE_DIR="$PWD/.ccache" staging_dir/host/bin/ccache -s || true
+
+    # 失败的构建也保存，已编译好的部分下次可直接命中
+    - name: Save ccache
+      if: ${{ !cancelled() && env.USE_CCACHE == 'true' }}
+      uses: actions/cache/save@v4
+      with:
+        path: openwrt/.ccache
+        key: ccache-${{ env.CACHE_VERSION }}-${{ env.REPO_BRANCH }}-${{ github.run_id }}
 
     - name: Upload build log
       uses: actions/upload-artifact@v4
@@ -350,7 +404,7 @@ jobs:
              "https://api.telegram.org/bot${TG_TOKEN}/sendMessage"
 
   # 独立 job：必须等 build 结束后再清理。
-  # actions/cache 是在 build 的收尾阶段才保存新缓存，所以放在这里才能准确"只留最近 3 个"。
+  # actions/cache 是在 build 的收尾阶段才保存新缓存，所以放在这里才能准确"只留最近 N 个"。
   clean-cache:
     needs: build
     if: ${{ !cancelled() }}
@@ -359,27 +413,31 @@ jobs:
     permissions:
       actions: write
     steps:
-    - name: Keep latest 3 toolchain caches
+    - name: Prune old caches
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         REPO: ${{ github.repository }}
-        KEEP: 3
       run: |
-        # 只处理以 toolchain- 开头的缓存，按创建时间新→旧排序，跳过最近 KEEP 个，其余删除
-        gh cache list --repo "$REPO" --key toolchain- \
-          --sort created_at --order desc --limit 100 \
-          --json id,key,createdAt \
-          --jq ".[$KEEP:][] | [.id, .key] | @tsv" > old_caches.txt || true
+        # 格式：前缀:保留数量。按创建时间新→旧排序，跳过最近 N 个，其余删除
+        for rule in "toolchain-:3" "ccache-:2"; do
+          prefix="${rule%%:*}"
+          keep="${rule##*:}"
+          echo "== 清理 ${prefix}*，保留最近 ${keep} 个 =="
+          gh cache list --repo "$REPO" --key "$prefix" \
+            --sort created_at --order desc --limit 100 \
+            --json id,key \
+            --jq ".[$keep:][] | [.id, .key] | @tsv" > old_caches.txt || true
 
-        if [ ! -s old_caches.txt ]; then
-          echo "没有需要清理的缓存"
-          exit 0
-        fi
+          if [ ! -s old_caches.txt ]; then
+            echo "没有需要清理的缓存"
+            continue
+          fi
 
-        while IFS=$'\t' read -r id key; do
-          echo "删除缓存: $key ($id)"
-          gh cache delete "$id" --repo "$REPO" || true
-        done < old_caches.txt
+          while IFS=$'\t' read -r id key; do
+            echo "删除缓存: $key ($id)"
+            gh cache delete "$id" --repo "$REPO" || true
+          done < old_caches.txt
+        done
 
         echo "当前剩余缓存:"
-        gh cache list --repo "$REPO" --key toolchain- --sort created_at --order desc
+        gh cache list --repo "$REPO" --sort created_at --order desc
